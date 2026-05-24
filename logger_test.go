@@ -6,9 +6,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"go.uber.org/zap/zapcore"
 )
 
 // TestLoggerBasicAndTag 测试基础日志写入与 Tag 功能
+// 覆盖所有可安全调用的日志级别: Debug, Info, Warn, Error, DPanic
 func TestLoggerBasicAndTag(t *testing.T) {
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
@@ -23,11 +26,15 @@ func TestLoggerBasicAndTag(t *testing.T) {
 	logger := New(cfg)
 	defer logger.Close()
 
-	logger.Infof("user %s logged in", "alice")
+	// 测试所有可安全调用的日志级别
 	logger.Debugf("debug message")
+	logger.Infof("user %s logged in", "alice")
+	logger.Warnf("connection lost")
+	logger.Errorf("error occurred: %d", 500)
+	logger.DPanic("dpanic message - development only")
 
 	subLogger := logger.WithTag("UAPI")
-	subLogger.Warnf("connection lost")
+	subLogger.Warnf("sub logger warn")
 
 	// 确保刷入磁盘
 	logger.Sync()
@@ -39,15 +46,31 @@ func TestLoggerBasicAndTag(t *testing.T) {
 
 	output := string(content)
 
-	// 验证内容
-	if !strings.Contains(output, "user alice logged in") {
-		t.Error("Infof 格式化失败")
+	// 验证各级别日志内容
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"Debug", "debug message"},
+		{"Info", "user alice logged in"},
+		{"Warn", "connection lost"},
+		{"Error", "error occurred: 500"},
+		{"DPanic", "dpanic message"},
+		{"SubLogger", "sub logger warn"},
 	}
-	if !strings.Contains(output, "debug message") {
-		t.Error("Debugf 写入失败")
+
+	for _, tt := range tests {
+		if !strings.Contains(output, tt.content) {
+			t.Errorf("%s 级别日志未正确写入", tt.name)
+		}
 	}
-	if !strings.Contains(output, "connection lost") {
-		t.Error("Warnf 写入失败")
+
+	// 验证级别标签
+	levelTags := []string{"[DEBUG]", "[INFO]", "[WARN]", "[ERROR]"}
+	for _, tag := range levelTags {
+		if !strings.Contains(output, tag) {
+			t.Errorf("日志级别标签 %s 未正确输出", tag)
+		}
 	}
 
 	// 验证 Tag
@@ -59,32 +82,90 @@ func TestLoggerBasicAndTag(t *testing.T) {
 	}
 }
 
-// TestLoggerLevelFilter 测试文件级别的过滤
-func TestLoggerLevelFilter(t *testing.T) {
+// TestLoggerLevelFiltering 测试不同级别的过滤效果
+// 合并了原有的 TestLoggerLevelFilter 功能
+func TestLoggerLevelFiltering(t *testing.T) {
 	tmpDir := t.TempDir()
-	logFile := filepath.Join(tmpDir, "level.log")
 
-	cfg := Config{
-		ConsoleLevel: "info",
-		FileLevel:    "warn", // 文件仅记录 warn 及以上
-		LogFile:      logFile,
+	testCases := []struct {
+		name        string
+		fileLevel   string
+		expectDebug bool
+		expectInfo  bool
+		expectWarn  bool
+		expectError bool
+	}{
+		{
+			name:        "debug level - all logs",
+			fileLevel:   "debug",
+			expectDebug: true,
+			expectInfo:  true,
+			expectWarn:  true,
+			expectError: true,
+		},
+		{
+			name:        "info level - no debug",
+			fileLevel:   "info",
+			expectDebug: false,
+			expectInfo:  true,
+			expectWarn:  true,
+			expectError: true,
+		},
+		{
+			name:        "warn level - only warn and above",
+			fileLevel:   "warn",
+			expectDebug: false,
+			expectInfo:  false,
+			expectWarn:  true,
+			expectError: true,
+		},
+		{
+			name:        "error level - only error",
+			fileLevel:   "error",
+			expectDebug: false,
+			expectInfo:  false,
+			expectWarn:  false,
+			expectError: true,
+		},
 	}
 
-	logger := New(cfg)
-	defer logger.Close()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			logFile := filepath.Join(tmpDir, strings.ReplaceAll(tc.name, " ", "_")+".log")
 
-	logger.Infof("this should not be in file")
-	logger.Warnf("this should be in file")
-	logger.Sync()
+			cfg := Config{
+				ConsoleLevel: "error", // 减少控制台输出
+				FileLevel:    tc.fileLevel,
+				LogFile:      logFile,
+			}
 
-	content, _ := os.ReadFile(logFile)
-	output := string(content)
+			logger := New(cfg)
+			defer logger.Close()
 
-	if strings.Contains(output, "this should not be in file") {
-		t.Error("Info 级别未被正确过滤")
-	}
-	if !strings.Contains(output, "this should be in file") {
-		t.Error("Warn 级别写入失败")
+			logger.Debug("debug log")
+			logger.Info("info log")
+			logger.Warn("warn log")
+			logger.Error("error log")
+			logger.Sync()
+
+			content, _ := os.ReadFile(logFile)
+			output := string(content)
+
+			checkLevel := func(level string, expected bool) {
+				contains := strings.Contains(output, level+" log")
+				if expected && !contains {
+					t.Errorf("期望包含 %s 日志，但未找到", level)
+				}
+				if !expected && contains {
+					t.Errorf("不应包含 %s 日志，但找到了", level)
+				}
+			}
+
+			checkLevel("debug", tc.expectDebug)
+			checkLevel("info", tc.expectInfo)
+			checkLevel("warn", tc.expectWarn)
+			checkLevel("error", tc.expectError)
+		})
 	}
 }
 
@@ -274,4 +355,83 @@ func TestDefaultLogger(t *testing.T) {
 	if !strings.Contains(string(content), "global logger test") {
 		t.Error("Default logger 写入失败")
 	}
+}
+
+// TestLoggerPanicAndFatal 测试 Panic 和 Fatal 级别
+// 注意：这些级别会导致程序终止，因此实际调用代码已注释
+func TestLoggerPanicAndFatal(t *testing.T) {
+	tmpDir := t.TempDir()
+	logFile := filepath.Join(tmpDir, "panic_fatal.log")
+
+	cfg := Config{
+		ConsoleLevel: "debug",
+		FileLevel:    "debug",
+		LogFile:      logFile,
+		DefaultTag:   "PANIC_FATAL_TEST",
+	}
+
+	logger := New(cfg)
+	defer logger.Close()
+
+	// 以下级别会导致程序终止，取消注释可手动测试：
+	// logger.Panic("this will panic")
+	// logger.Panicf("this will panic: %s", "formatted")
+	// logger.Fatal("this will exit")
+	// logger.Fatalf("this will exit: %d", 1)
+
+	t.Log("Panic 和 Fatal 级别测试已跳过（会导致程序终止），如需测试请取消注释相关代码")
+}
+
+// TestLoggerLevelConstants 验证 zap 支持的日志级别常量
+// zap 支持的级别（从低到高）:
+//
+//	DebugLevel (-1): 调试信息
+//	InfoLevel (0): 一般信息
+//	WarnLevel (1): 警告信息
+//	ErrorLevel (2): 错误信息
+//	DPanicLevel (3): 开发环境 panic（生产环境仅记录日志）
+//	PanicLevel (4): 记录日志后触发 panic
+//	FatalLevel (5): 记录日志后退出程序
+func TestLoggerLevelConstants(t *testing.T) {
+	levels := []struct {
+		name  string
+		level zapcore.Level
+	}{
+		{"DebugLevel", zapcore.DebugLevel},   // -1
+		{"InfoLevel", zapcore.InfoLevel},     // 0
+		{"WarnLevel", zapcore.WarnLevel},     // 1
+		{"ErrorLevel", zapcore.ErrorLevel},   // 2
+		{"DPanicLevel", zapcore.DPanicLevel}, // 3
+		{"PanicLevel", zapcore.PanicLevel},   // 4
+		{"FatalLevel", zapcore.FatalLevel},   // 5
+	}
+
+	// 验证级别顺序
+	for i := 0; i < len(levels)-1; i++ {
+		if levels[i].level >= levels[i+1].level {
+			t.Errorf("日志级别顺序错误: %s (%d) 应该小于 %s (%d)",
+				levels[i].name, levels[i].level,
+				levels[i+1].name, levels[i+1].level)
+		}
+	}
+
+	// 验证具体值
+	expectedValues := map[string]int8{
+		"DebugLevel":  -1,
+		"InfoLevel":   0,
+		"WarnLevel":   1,
+		"ErrorLevel":  2,
+		"DPanicLevel": 3,
+		"PanicLevel":  4,
+		"FatalLevel":  5,
+	}
+
+	for _, l := range levels {
+		if int8(l.level) != expectedValues[l.name] {
+			t.Errorf("%s 的值错误: 期望 %d, 实际 %d",
+				l.name, expectedValues[l.name], l.level)
+		}
+	}
+
+	t.Logf("zap 支持的日志级别: Debug(-1) < Info(0) < Warn(1) < Error(2) < DPanic(3) < Panic(4) < Fatal(5)")
 }
