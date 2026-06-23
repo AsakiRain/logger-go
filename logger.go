@@ -149,11 +149,14 @@ func New(cfg Config) *Logger {
 		zLogger = zLogger.Named(cfg.DefaultTag)
 	}
 
-	return &Logger{
+	logger := &Logger{
 		SugaredLogger: zLogger.Sugar(),
-		fileCloser:    rotator,        // 保存起来用于 Close
 		showCaller:    cfg.ShowCaller, // 保存状态供 WithTag 使用
 	}
+	if rotator != nil {
+		logger.fileCloser = rotator // 保存起来用于 Close
+	}
+	return logger
 }
 
 // WithTag 衍生出一个携带新 Tag 的 Logger 实例

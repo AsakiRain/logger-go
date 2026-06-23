@@ -169,6 +169,17 @@ func TestLoggerLevelFiltering(t *testing.T) {
 	}
 }
 
+func TestLoggerCloseWithoutLogFile(t *testing.T) {
+	logger := New(Config{
+		ConsoleLevel: "error",
+		FileLevel:    "debug",
+	})
+
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close without LogFile should not fail: %v", err)
+	}
+}
+
 // TestLoggerConcurrent 测试高并发下的协程安全性
 func TestLoggerConcurrent(t *testing.T) {
 	tmpDir := t.TempDir()
