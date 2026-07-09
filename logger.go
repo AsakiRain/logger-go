@@ -19,6 +19,7 @@ type Config struct {
 	MaxBackups   int    `toml:"max_backups"`   // 日志文件最多保存多少个备份
 	MaxAge       int    `toml:"max_age"`       // 文件最多保存多少天 (0 表示不限制)
 	Compress     bool   `toml:"compress"`      // 是否压缩旧日志
+	Flush        bool   `toml:"flush"`         // 是否每次写入后立即同步到磁盘
 	DefaultTag   string `toml:"default_tag"`   // 默认 Tag
 	ShowCaller   bool   `toml:"show_caller"`   // 是否在日志中显示调用者信息
 }
@@ -28,6 +29,28 @@ type Logger struct {
 	*zap.SugaredLogger
 	fileCloser io.Closer // 保存底层轮转器的句柄，用于释放文件锁
 	showCaller bool      // 新增：保存状态供 WithTag 使用
+}
+
+type flushingWriteSyncer struct {
+	zapcore.WriteSyncer
+}
+
+func (w flushingWriteSyncer) Write(p []byte) (int, error) {
+	n, err := w.WriteSyncer.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if syncErr := w.WriteSyncer.Sync(); syncErr != nil {
+		return n, syncErr
+	}
+	return n, nil
+}
+
+func maybeFlushWriter(ws zapcore.WriteSyncer, flush bool) zapcore.WriteSyncer {
+	if !flush {
+		return ws
+	}
+	return flushingWriteSyncer{WriteSyncer: ws}
 }
 
 // Default 全局默认实例，方便包级别直接调用（按需使用）
@@ -129,7 +152,7 @@ func New(cfg Config) *Logger {
 
 		cores = append(cores, zapcore.NewCore(
 			fileEncoder,
-			zapcore.AddSync(rotator),
+			maybeFlushWriter(zapcore.AddSync(rotator), cfg.Flush),
 			fileLevel,
 		))
 	}

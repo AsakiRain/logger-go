@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,16 @@ import (
 
 	"go.uber.org/zap/zapcore"
 )
+
+type countingSink struct {
+	bytes.Buffer
+	syncs int
+}
+
+func (s *countingSink) Sync() error {
+	s.syncs++
+	return nil
+}
 
 // TestLoggerBasicAndTag 测试基础日志写入与 Tag 功能
 // 覆盖所有可安全调用的日志级别: Debug, Info, Warn, Error, DPanic
@@ -177,6 +188,61 @@ func TestLoggerCloseWithoutLogFile(t *testing.T) {
 
 	if err := logger.Close(); err != nil {
 		t.Fatalf("Close without LogFile should not fail: %v", err)
+	}
+}
+
+func TestFlushWriteSyncerSyncsEveryWrite(t *testing.T) {
+	sink := &countingSink{}
+	writer := maybeFlushWriter(sink, true)
+
+	if _, err := writer.Write([]byte("first\n")); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	if _, err := writer.Write([]byte("second\n")); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+
+	if sink.syncs != 2 {
+		t.Fatalf("sync count = %d, want 2", sink.syncs)
+	}
+	if got := sink.String(); got != "first\nsecond\n" {
+		t.Fatalf("written content = %q", got)
+	}
+}
+
+func TestFlushWriteSyncerCanBeDisabled(t *testing.T) {
+	sink := &countingSink{}
+	writer := maybeFlushWriter(sink, false)
+
+	if _, err := writer.Write([]byte("message\n")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	if sink.syncs != 0 {
+		t.Fatalf("sync count = %d, want 0", sink.syncs)
+	}
+}
+
+func TestLoggerFlushConfigWritesFileImmediately(t *testing.T) {
+	tmpDir := t.TempDir()
+	logFile := filepath.Join(tmpDir, "flush.log")
+
+	logger := New(Config{
+		ConsoleLevel: "error",
+		FileLevel:    "info",
+		LogFile:      logFile,
+		Flush:        true,
+	})
+	defer logger.Close()
+
+	logger.Info("flush config message")
+
+	content, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(content), "flush config message") {
+		t.Fatalf("log file does not contain flushed message: %q", string(content))
 	}
 }
 
